@@ -1,0 +1,498 @@
+const express = require('express');
+const router = express.Router();
+const Moralis = require('moralis').default;
+const { getMoralisChain, getExplorerUrl, chains, chainGroups } = require('../config/chains');
+const { ethers } = require('ethers');
+
+// ── RPC providers per chain (fallback when Moralis fails) ────
+const RPC_URLS = {
+  sepolia: process.env.SEPOLIA_RPC || 'https://ethereum-sepolia-rpc.publicnode.com',
+  ethereum: process.env.ETHEREUM_RPC || 'https://ethereum-rpc.publicnode.com',
+  polygon: process.env.POLYGON_RPC || 'https://polygon-rpc.publicnode.com',
+  bsc: process.env.BSC_RPC || 'https://bsc-rpc.publicnode.com',
+  localhost: process.env.LOCALHOST_RPC || 'http://127.0.0.1:8545',
+};
+
+function getProvider(chainKey) {
+  const url = RPC_URLS[chainKey];
+  if (!url) return null;
+  return new ethers.JsonRpcProvider(url);
+}
+
+const NFT_ABI = [
+  'function uri(uint256) view returns (string)',
+  'function tokenURI(uint256) view returns (string)',
+  'function supportsInterface(bytes4) view returns (bool)',
+  'function balanceOf(address,uint256) view returns (uint256)',
+  'function balanceOf(address) view returns (uint256)',
+  'function name() view returns (string)',
+  'function symbol() view returns (string)',
+  'function totalSupply() view returns (uint256)',
+  'function tokenByIndex(uint256) view returns (uint256)',
+  'function ownerOf(uint256) view returns (address)',
+];
+
+// ── GET /api/chains ──────────────────────────────────────
+router.get('/chains', (req, res) => {
+  const list = Object.entries(chains).map(([key, val]) => ({
+    key, name: val.name, chainId: val.decimal, explorer: val.explorer,
+  }));
+  res.json({ chains: list, groups: chainGroups });
+});
+
+// ── GET /api/nfts/contract/:chain/:address ───────────────
+router.get('/nfts/contract/:chain/:address', async (req, res, next) => {
+  try {
+    const { chain, address } = req.params;
+    const { limit = 20, cursor } = req.query;
+
+    if (chain === 'localhost') {
+      return res.json(await fetchRPCContractNFTs(chain, address, parseInt(limit)));
+    }
+
+    const moralisChain = getMoralisChain(chain);
+
+    if (moralisChain) {
+      try {
+        const response = await Moralis.EvmApi.nft.getContractNFTs({
+          address, chain: moralisChain,
+          limit: Math.min(parseInt(limit), 100),
+          cursor: cursor || undefined,
+          normalizeMetadata: true,
+        });
+        const result = response.toJSON();
+
+        if (result.result && result.result.length > 0) {
+          return res.json({
+            total: result.total || 0,
+            page: result.page || 0,
+            pageSize: result.page_size || parseInt(limit),
+            cursor: result.cursor || null,
+            results: (result.result || []).map(nft => formatNFT(nft, chain, address)),
+            source: 'moralis',
+          });
+        }
+        console.log(`[FALLBACK] Moralis empty for ${chain}/${address}, trying RPC...`);
+      } catch (moralisErr) {
+        console.log(`[MORALIS ERROR] ${moralisErr.message}, falling back to RPC...`);
+      }
+    }
+
+    console.log(`[RPC FALLBACK] ${chain}/${address}`);
+    const rpcResult = await fetchRPCContractNFTs(chain, address, parseInt(limit));
+    return res.json(rpcResult);
+
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── GET /api/nfts/wallet/:chain/:address ─────────────────
+router.get('/nfts/wallet/:chain/:address', async (req, res, next) => {
+  try {
+    const { chain, address } = req.params;
+    const { limit = 20, cursor, token_addresses } = req.query;
+
+    if (chain === 'localhost') {
+      return res.json({ total: 0, page: 0, pageSize: 0, cursor: null, results: [], note: 'Wallet enumeration not supported on localhost' });
+    }
+
+    const moralisChain = getMoralisChain(chain);
+    if (!moralisChain) {
+      return res.status(400).json({ error: `Unsupported chain: ${chain}` });
+    }
+
+    const options = {
+      address, chain: moralisChain,
+      limit: Math.min(parseInt(limit), 100),
+      cursor: cursor || undefined,
+      normalizeMetadata: true,
+    };
+
+    if (token_addresses) {
+      options.tokenAddresses = token_addresses.split(',');
+    }
+
+    let moralisResults = null;
+    try {
+      const response = await Moralis.EvmApi.nft.getWalletNFTs(options);
+      moralisResults = response.toJSON();
+    } catch (moralisErr) {
+      console.log(`[MORALIS WALLET ERROR] ${moralisErr.message}`);
+    }
+
+    if (moralisResults) {
+      let results = (moralisResults.result || []).map(nft => formatNFT(nft, chain, nft.token_address));
+
+      if (results.length === 0 && token_addresses && !cursor) {
+        const contracts = token_addresses.split(',');
+        for (const ca of contracts) {
+          console.log(`[FALLBACK] Wallet RPC lookup for ${ca}...`);
+          const rpcResults = await fetchRPCWalletNFTs(chain, ca.trim(), address, parseInt(limit));
+          results = results.concat(rpcResults);
+        }
+        if (results.length > 0) {
+          return res.json({
+            total: results.length, page: 0, pageSize: results.length,
+            cursor: null, results, source: 'rpc-fallback',
+          });
+        }
+      }
+
+      return res.json({
+        total: moralisResults.total || 0,
+        page: moralisResults.page || 0,
+        pageSize: moralisResults.page_size || parseInt(limit),
+        cursor: moralisResults.cursor || null,
+        results: await enrichMissingMetadata(results, chain),
+        source: 'moralis',
+      });
+    }
+
+    if (token_addresses) {
+      const contracts = token_addresses.split(',');
+      let results = [];
+      for (const ca of contracts) {
+        console.log(`[FULL FALLBACK] Wallet RPC for ${ca}...`);
+        const rpcResults = await fetchRPCWalletNFTs(chain, ca.trim(), address, parseInt(limit));
+        results = results.concat(rpcResults);
+      }
+      return res.json({
+        total: results.length, page: 0, pageSize: results.length,
+        cursor: null, results, source: 'rpc-fallback',
+      });
+    }
+
+    res.json({ total: 0, page: 0, pageSize: 0, cursor: null, results: [], error: 'Moralis unavailable and no contract filter for RPC fallback' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── GET /api/nfts/metadata/:chain/:address/:tokenId ─────
+router.get('/nfts/metadata/:chain/:address/:tokenId', async (req, res, next) => {
+  try {
+    const { chain, address, tokenId } = req.params;
+    const moralisChain = getMoralisChain(chain);
+
+    if (moralisChain) {
+      try {
+        const response = await Moralis.EvmApi.nft.getNFTMetadata({
+          address, chain: moralisChain, tokenId, normalizeMetadata: true,
+        });
+        const nft = response.toJSON();
+        if (nft && nft.token_id) {
+          return res.json(formatNFT(nft, chain, address));
+        }
+      } catch (e) {
+        console.log(`[FALLBACK] Moralis metadata failed: ${e.message}`);
+      }
+    }
+
+    const result = await fetchSingleNFTviaRPC(chain, address, tokenId);
+    if (result) return res.json(result);
+
+    res.status(404).json({ error: 'NFT not found' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── GET /api/nfts/render — proxy HTML with fixes ─────────
+router.get('/nfts/render', async (req, res, next) => {
+  try {
+    const { url } = req.query;
+    if (!url) return res.status(400).json({ error: 'Missing url param' });
+
+    const resolved = url.startsWith('ipfs://')
+      ? url.replace('ipfs://', 'https://ipfs.gembaticket.com/ipfs/')
+      : url;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    const response = await fetch(resolved, { signal: controller.signal });
+    clearTimeout(timeout);
+
+    if (!response.ok) return res.status(502).json({ error: 'Failed to fetch' });
+
+    let html = await response.text();
+
+    // Fix 1: Navigation bug - classList.add('')
+    html = html.replace(
+      "pages[cur].classList.add(n>cur?'prev':'');",
+      "if(n>cur)pages[cur].classList.add('prev');"
+    );
+
+    // Fix 2: Replace QR canvas with direct img tag
+    // Extract QR data URL from the script
+    const qrMatch = html.match(/text:'([^']*)'/);
+    const qrData = qrMatch ? qrMatch[1] : 'https://gembaticket.com';
+    const qrImgTag = '<img src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=' +
+      encodeURIComponent(qrData) +
+      '&color=1e1b4b&bgcolor=ffffff" style="width:180px;height:180px;border-radius:8px" />';
+
+    // Remove canvas element and replace with img
+    html = html.replace('<canvas id="qr"></canvas>', qrImgTag);
+
+    // Remove CDN script tag
+    html = html.replace('<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>', '');
+
+    // Remove old QR generation JS (between try{ and }catch(e){})
+    html = html.replace(/try\{new QRCode\(.*?\}catch\(e\)\{\}/s, '');
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ══════════════════════════════════════════════════════════
+// RPC FALLBACK FUNCTIONS
+// ══════════════════════════════════════════════════════════
+
+async function fetchRPCContractNFTs(chainKey, contractAddress, limit) {
+  const provider = getProvider(chainKey);
+  if (!provider) {
+    return { total: 0, page: 0, pageSize: 0, cursor: null, results: [], error: 'No RPC configured for this chain' };
+  }
+
+  const contract = new ethers.Contract(contractAddress, NFT_ABI, provider);
+  const results = [];
+
+  try {
+    const isERC1155 = await contract.supportsInterface('0xd9b67a26').catch(() => false);
+    const isERC721 = await contract.supportsInterface('0x80ac58cd').catch(() => false);
+    const name = await contract.name().catch(() => 'Unknown');
+    const symbol = await contract.symbol().catch(() => '');
+
+    console.log(`[RPC] Contract ${contractAddress}: ERC1155=${isERC1155}, ERC721=${isERC721}, name=${name}`);
+
+    if (isERC1155) {
+      const scanLimit = Math.min(limit, 100);
+      for (let id = 1; id <= scanLimit; id++) {
+        try {
+          const uri = await contract.uri(id);
+          const metadata = await fetchMetadataFromURI(uri, id);
+          results.push({
+            tokenId: String(id),
+            tokenAddress: contractAddress,
+            name: metadata?.name || `${name} #${id}`,
+            description: metadata?.description || '',
+            image: resolveIPFS(metadata?.image),
+            animationUrl: resolveIPFS(metadata?.animation_url),
+            attributes: metadata?.attributes || [],
+            tokenUri: uri,
+            contractType: 'ERC1155',
+            symbol, owner: null, amount: '1',
+            explorerUrl: getExplorerUrl(chainKey, 'token', contractAddress),
+            rawMetadata: metadata,
+          });
+          console.log(`[RPC] Found token #${id}: ${metadata?.name || 'no name'}`);
+        } catch (e) {
+          console.log(`[RPC] Token #${id} failed: ${e.message?.slice(0, 80)}`);
+          break;
+        }
+      }
+    } else if (isERC721) {
+      const totalSupply = await contract.totalSupply().catch(() => 0n);
+      const count = Math.min(Number(totalSupply), limit);
+
+      for (let i = 0; i < count; i++) {
+        try {
+          const tokenId = await contract.tokenByIndex(i);
+          const uri = await contract.tokenURI(tokenId).catch(() => '');
+          const owner = await contract.ownerOf(tokenId).catch(() => null);
+          const metadata = uri ? await fetchMetadataFromURI(uri, Number(tokenId)) : null;
+
+          results.push({
+            tokenId: tokenId.toString(),
+            tokenAddress: contractAddress,
+            name: metadata?.name || `${name} #${tokenId}`,
+            description: metadata?.description || '',
+            image: resolveIPFS(metadata?.image),
+            animationUrl: resolveIPFS(metadata?.animation_url),
+            attributes: metadata?.attributes || [],
+            tokenUri: uri,
+            contractType: 'ERC721',
+            symbol, owner, amount: '1',
+            explorerUrl: getExplorerUrl(chainKey, 'token', contractAddress),
+            rawMetadata: metadata,
+          });
+        } catch { break; }
+      }
+    } else {
+      console.log(`[RPC] Contract is neither ERC721 nor ERC1155`);
+    }
+
+    return {
+      total: results.length, page: 0, pageSize: results.length,
+      cursor: null, results, source: 'rpc-direct',
+    };
+  } catch (err) {
+    console.error(`[RPC ERROR] ${err.message}`);
+    return { total: 0, page: 0, pageSize: 0, cursor: null, results: [], error: err.message, source: 'rpc-error' };
+  }
+}
+
+async function fetchRPCWalletNFTs(chainKey, contractAddress, walletAddress, limit) {
+  const provider = getProvider(chainKey);
+  if (!provider) return [];
+
+  const contract = new ethers.Contract(contractAddress, NFT_ABI, provider);
+  const results = [];
+
+  try {
+    const isERC1155 = await contract.supportsInterface('0xd9b67a26').catch(() => false);
+    const name = await contract.name().catch(() => 'Unknown');
+    const symbol = await contract.symbol().catch(() => '');
+
+    if (isERC1155) {
+      for (let id = 1; id <= Math.min(limit, 100); id++) {
+        try {
+          const balance = await contract.balanceOf(walletAddress, id);
+          if (balance > 0n) {
+            const uri = await contract.uri(id);
+            const metadata = await fetchMetadataFromURI(uri, id);
+            results.push({
+              tokenId: String(id),
+              tokenAddress: contractAddress,
+              name: metadata?.name || `${name} #${id}`,
+              description: metadata?.description || '',
+              image: resolveIPFS(metadata?.image),
+              animationUrl: resolveIPFS(metadata?.animation_url),
+              attributes: metadata?.attributes || [],
+              tokenUri: uri,
+              contractType: 'ERC1155',
+              symbol, owner: walletAddress,
+              amount: balance.toString(),
+              explorerUrl: getExplorerUrl(chainKey, 'token', contractAddress),
+              rawMetadata: metadata,
+            });
+          }
+        } catch { break; }
+      }
+    }
+  } catch (err) {
+    console.error(`[RPC WALLET ERROR] ${err.message}`);
+  }
+  return results;
+}
+
+async function fetchSingleNFTviaRPC(chainKey, contractAddress, tokenId) {
+  const provider = getProvider(chainKey);
+  if (!provider) return null;
+
+  const contract = new ethers.Contract(contractAddress, NFT_ABI, provider);
+  try {
+    const isERC1155 = await contract.supportsInterface('0xd9b67a26').catch(() => false);
+    const name = await contract.name().catch(() => 'Unknown');
+    const symbol = await contract.symbol().catch(() => '');
+    const uri = isERC1155 ? await contract.uri(tokenId) : await contract.tokenURI(tokenId);
+    const metadata = await fetchMetadataFromURI(uri, tokenId);
+
+    return {
+      tokenId: String(tokenId), tokenAddress: contractAddress,
+      name: metadata?.name || `${name} #${tokenId}`,
+      description: metadata?.description || '',
+      image: resolveIPFS(metadata?.image),
+      animationUrl: resolveIPFS(metadata?.animation_url),
+      attributes: metadata?.attributes || [],
+      tokenUri: uri, contractType: isERC1155 ? 'ERC1155' : 'ERC721',
+      symbol, owner: null, amount: '1',
+      explorerUrl: getExplorerUrl(chainKey, 'token', contractAddress),
+      rawMetadata: metadata,
+    };
+  } catch (err) {
+    console.error(`[RPC SINGLE ERROR] ${err.message}`);
+    return null;
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+// HELPERS
+// ══════════════════════════════════════════════════════════
+
+async function fetchMetadataFromURI(uri, tokenId) {
+  if (!uri) return null;
+  let resolvedUri = uri.replace('{id}', String(tokenId).padStart(64, '0'));
+  resolvedUri = resolveIPFS(resolvedUri);
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    const res = await fetch(resolvedUri, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch { return null; }
+}
+
+async function enrichMissingMetadata(results, chainKey) {
+  return Promise.all(results.map(async (nft) => {
+    try {
+      // If missing tokenUri, fetch from RPC
+      if (!nft.tokenUri && nft.tokenAddress && nft.tokenId) {
+        const provider = getProvider(chainKey || 'sepolia');
+        if (provider) {
+          const contract = new ethers.Contract(nft.tokenAddress, [
+            'function uri(uint256) view returns (string)',
+            'function tokenURI(uint256) view returns (string)'
+          ], provider);
+          nft.tokenUri = await contract.uri(nft.tokenId).catch(() => null)
+            || await contract.tokenURI(nft.tokenId).catch(() => null);
+        }
+      }
+      // If still missing metadata, fetch from tokenUri
+      if (nft.tokenUri && (!nft.animationUrl || !nft.image || nft.name === '#' + nft.tokenId)) {
+        const uri = resolveIPFS(nft.tokenUri);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+        const res = await fetch(uri, { signal: controller.signal });
+        clearTimeout(timeout);
+        if (res.ok) {
+          const meta = await res.json();
+          if (meta.animation_url) nft.animationUrl = resolveIPFS(meta.animation_url);
+          if (meta.image) nft.image = resolveIPFS(meta.image);
+          if (meta.name) nft.name = meta.name;
+          if (meta.description) nft.description = meta.description;
+          if (meta.attributes) nft.attributes = meta.attributes;
+          nft.rawMetadata = meta;
+        }
+      }
+    } catch (e) {}
+    return nft;
+  }));
+}
+
+function formatNFT(nft, chainKey, contractAddress) {
+  const metadata = nft.normalized_metadata || tryParseMetadata(nft.metadata);
+  const image = resolveIPFS(metadata?.image || metadata?.image_url || nft.token_uri);
+  const animationUrl = resolveIPFS(metadata?.animation_url);
+
+  return {
+    tokenId: nft.token_id, tokenAddress: nft.token_address || contractAddress,
+    name: metadata?.name || nft.name || `#${nft.token_id}`,
+    description: metadata?.description || '', image, animationUrl,
+    attributes: metadata?.attributes || [],
+    tokenUri: nft.token_uri, contractType: nft.contract_type,
+    symbol: nft.symbol, owner: nft.owner_of || null, amount: nft.amount || '1',
+    explorerUrl: getExplorerUrl(chainKey, 'token', nft.token_address || contractAddress),
+    rawMetadata: metadata,
+  };
+}
+
+function tryParseMetadata(metadata) {
+  if (!metadata) return null;
+  if (typeof metadata === 'object') return metadata;
+  try { return JSON.parse(metadata); } catch { return null; }
+}
+
+function resolveIPFS(url) {
+  if (!url) return null;
+  if (url.startsWith('ipfs://')) return url.replace('ipfs://', 'https://ipfs.gembaticket.com/ipfs/');
+  if (url.startsWith('ar://')) return url.replace('ar://', 'https://arweave.net/');
+  return url;
+}
+
+module.exports = router;
