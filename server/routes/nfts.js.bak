@@ -49,21 +49,6 @@ const NFT_ABI = [
   'function ownerOf(uint256) view returns (address)',
 ];
 
-
-// ── In-memory metadata cache ─────────────────────────────
-const metadataCache = new Map();
-const CACHE_TTL = 10 * 60 * 1000; // 10 minutes
-function getCached(key) {
-  const entry = metadataCache.get(key);
-  if (!entry) return null;
-  if (Date.now() - entry.ts > CACHE_TTL) { metadataCache.delete(key); return null; }
-  return entry.data;
-}
-function setCache(key, data) {
-  if (metadataCache.size > 5000) metadataCache.clear();
-  metadataCache.set(key, { data, ts: Date.now() });
-}
-
 // ── GET /api/chains ──────────────────────────────────────
 router.get('/chains', (req, res) => {
   const list = Object.entries(chains).map(([key, val]) => ({
@@ -453,34 +438,19 @@ const IPFS_GATEWAYS = [
   'https://ipfs.io/ipfs/',
 ];
 
-async function fetchFromGateway(url, timeoutMs) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs || 8000);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timer);
-    if (!res.ok) return null;
-    const text = await res.text();
-    if (text.startsWith('<!DOCTYPE') || text.startsWith('<html') || text.startsWith('<?xml')) return null;
-    return JSON.parse(text);
-  } catch { clearTimeout(timer); return null; }
-}
-
 async function fetchWithGatewayFallback(ipfsPath, timeoutMs) {
-  const cached = getCached(ipfsPath);
-  if (cached) return cached;
-
-  // Race first 2 gateways, then try rest sequentially
-  const fast = await Promise.any([
-    fetchFromGateway(IPFS_GATEWAYS[0] + ipfsPath, timeoutMs || 8000),
-    fetchFromGateway(IPFS_GATEWAYS[1] + ipfsPath, timeoutMs || 8000),
-  ]).catch(() => null);
-
-  if (fast) { setCache(ipfsPath, fast); return fast; }
-
-  for (let i = 2; i < IPFS_GATEWAYS.length; i++) {
-    const result = await fetchFromGateway(IPFS_GATEWAYS[i] + ipfsPath, timeoutMs || 8000);
-    if (result) { setCache(ipfsPath, result); return result; }
+  for (const gw of IPFS_GATEWAYS) {
+    try {
+      const url = gw + ipfsPath;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs || 10000);
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timer);
+      if (!res.ok) continue;
+      const text = await res.text();
+      if (text.startsWith('<!DOCTYPE') || text.startsWith('<html') || text.startsWith('<?xml')) continue;
+      try { return JSON.parse(text); } catch { continue; }
+    } catch { continue; }
   }
   return null;
 }
