@@ -1,13 +1,13 @@
 require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') });
+
 const express = require('express');
 const cors = require('cors');
-const path = require('path');
 const Moralis = require('moralis').default;
 const nftRoutes = require('./routes/nfts');
 const errorHandler = require('./middleware/errorHandler');
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3087;
 
 // ── Middleware ───────────────────────────────────────────
 app.use(cors());
@@ -30,15 +30,6 @@ app.use('/api', nftRoutes);
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
-
-// ── Serve React build in production ─────────────────────
-if (process.env.NODE_ENV === 'production') {
-  const clientBuild = path.join(__dirname, '../client/dist');
-  app.use(express.static(clientBuild));
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(clientBuild, 'index.html'));
-  });
-}
 
 // ── Error handler ───────────────────────────────────────
 app.use(errorHandler);

@@ -27,7 +27,7 @@ Server (Express.js, port 4002)
 
 ## Features
 
-- **Multi-chain support:** Ethereum, Sepolia, Polygon, BSC, localhost (Hardhat/Ganache)
+- **Multi-chain support:** Ethereum, Polygon, BSC, Arbitrum, Base, Avalanche, Optimism, Linea + testnets (Sepolia, Amoy, …), **GembaBlockchain — mainnet (chainId 821206) & testnet (821207)**, localhost. Gemba chains are fetched via the GembaScan (Blockscout) API + direct RPC (Moralis does not index them).
 - **Three query modes:** Wallet Address (WA), Contract Address (CA), or WA+CA combined with server-side filtering
 - **Moralis + RPC dual-source:** Automatic fallback to direct contract calls when Moralis returns incomplete data
 - **Metadata enrichment:** Fetches tokenURI from on-chain contracts when Moralis omits metadata fields (name, image, animation_url)
@@ -78,6 +78,8 @@ MORALIS_API_KEY=<moralis_api_key>
 SEPOLIA_RPC=https://sepolia.infura.io/v3/<key>
 ETHEREUM_RPC=https://ethereum-rpc.publicnode.com
 POLYGON_RPC=https://polygon-rpc.publicnode.com
+GEMBA_RPC=https://rpc.gembachain.io
+GEMBA_TESTNET_RPC=https://rpc1.gembascan.io
 BSC_RPC=https://bsc-rpc.publicnode.com
 LOCALHOST_RPC=http://127.0.0.1:8545
 PORT=4002

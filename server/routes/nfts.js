@@ -26,6 +26,9 @@ const RPC_URLS = {
   mumbai: process.env.MUMBAI_RPC || 'https://rpc-mumbai.maticvigil.com',
   bsc_testnet: process.env.BSC_TESTNET_RPC || 'https://bsc-testnet-rpc.publicnode.com',
   holesky: process.env.HOLESKY_RPC || 'https://ethereum-holesky-rpc.publicnode.com',
+  // GembaBlockchain
+  gemba: process.env.GEMBA_RPC || 'https://rpc.gembachain.io',
+  gemba_testnet: process.env.GEMBA_TESTNET_RPC || 'https://rpc1.gembascan.io',
   // Local
   localhost: process.env.LOCALHOST_RPC || 'http://127.0.0.1:8545',
 };
@@ -131,6 +134,10 @@ router.get('/nfts/wallet/:chain/:address', async (req, res, next) => {
 
     const moralisChain = getMoralisChain(chain);
     if (!moralisChain) {
+      const cfg = chains[chain];
+      if (cfg && cfg.blockscout) {
+        return res.json(await fetchBlockscoutWalletNFTs(chain, address, parseInt(limit), token_addresses));
+      }
       return res.status(400).json({ error: `Unsupported chain: ${chain}` });
     }
 
@@ -574,6 +581,59 @@ function resolveIPFS(url) {
   }
   if (url.startsWith('ar://')) return url.replace('ar://', 'https://arweave.net/');
   return url;
+}
+
+// ── Blockscout wallet NFTs (Gemba & other non-Moralis chains) ──
+async function fetchBlockscoutWalletNFTs(chainKey, address, limit, tokenAddresses) {
+  const base = chains[chainKey] && chains[chainKey].blockscout;
+  if (!base) return { total: 0, page: 0, pageSize: 0, cursor: null, results: [], error: 'no blockscout for chain' };
+  try {
+    const url = `${base}/api/v2/addresses/${address}/nft?type=ERC-721,ERC-1155,ERC-404`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    const r = await fetch(url, { signal: controller.signal });
+    clearTimeout(timer);
+    if (!r.ok) return { total: 0, page: 0, pageSize: 0, cursor: null, results: [], error: `blockscout ${r.status}`, source: 'blockscout' };
+    const data = await r.json();
+    let rawItems = data.items || [];
+    if (tokenAddresses) {
+      const set = new Set(String(tokenAddresses).split(',').map((a) => a.trim().toLowerCase()).filter(Boolean));
+      rawItems = rawItems.filter((it) => {
+        const a = it.token && (it.token.address_hash || it.token.address);
+        return a && set.has(a.toLowerCase());
+      });
+    }
+    const items = rawItems.slice(0, limit);
+    const results = await Promise.all(items.map(async (it) => {
+      const tokenAddr = (it.token && (it.token.address_hash || it.token.address)) || null;
+      let meta = it.metadata || null;
+      // enrich from token URI if Blockscout has no parsed metadata yet
+      if ((!meta || !meta.image) && tokenAddr && it.id != null) {
+        const viaRpc = await fetchSingleNFTviaRPC(chainKey, tokenAddr, it.id).catch(() => null);
+        if (viaRpc && viaRpc.rawMetadata) meta = viaRpc.rawMetadata;
+      }
+      const ctype = it.token && it.token.type ? String(it.token.type).replace(/-/g, '') : 'ERC1155';
+      return {
+        tokenId: String(it.id),
+        tokenAddress: tokenAddr,
+        name: (meta && meta.name) || (it.token && it.token.name) || `#${it.id}`,
+        description: (meta && meta.description) || '',
+        image: resolveIPFS((meta && meta.image) || it.image_url),
+        animationUrl: resolveIPFS((meta && meta.animation_url) || it.animation_url),
+        attributes: (meta && meta.attributes) || [],
+        tokenUri: it.token_uri || null,
+        contractType: ctype,
+        symbol: (it.token && it.token.symbol) || '',
+        owner: address,
+        amount: it.value || '1',
+        explorerUrl: getExplorerUrl(chainKey, 'token', tokenAddr),
+        rawMetadata: meta,
+      };
+    }));
+    return { total: results.length, page: 0, pageSize: results.length, cursor: null, results, source: 'blockscout' };
+  } catch (e) {
+    return { total: 0, page: 0, pageSize: 0, cursor: null, results: [], error: e.message, source: 'blockscout-error' };
+  }
 }
 
 module.exports = router;

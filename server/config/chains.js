@@ -25,20 +25,24 @@ const chains = {
   arbitrum_sepolia:{ hex: '0x66eee',    decimal: 421614,    name: 'Arbitrum Sepolia',   explorer: 'https://sepolia.arbiscan.io' },
   base_sepolia:    { hex: '0x14a34',    decimal: 84532,     name: 'Base Sepolia',       explorer: 'https://sepolia.basescan.org' },
 
+  gemba:           { hex: '0xc87d6',    decimal: 821206,    name: 'Gemba',              explorer: 'https://gembascan.io',          blockscout: 'https://gembascan.io',          rpcOnly: true },
+  gemba_testnet:   { hex: '0xc87d7',    decimal: 821207,    name: 'Gemba Testnet',      explorer: 'https://testnet.gembascan.io',  blockscout: 'https://testnet.gembascan.io',  rpcOnly: true },
+
   // ── Local ─────────────────────────────────────────
   localhost:       { hex: '0x7a69',     decimal: 31337,     name: 'Localhost (Hardhat)', explorer: null },
 };
 
 // Group for frontend dropdown
 const chainGroups = {
-  'Mainnets': ['ethereum', 'polygon', 'bsc', 'arbitrum', 'base', 'avalanche', 'optimism', 'linea', 'fantom', 'cronos', 'gnosis', 'chiliz', 'moonbeam'],
-  'Testnets': ['sepolia', 'holesky', 'amoy', 'bsc_testnet', 'arbitrum_sepolia', 'base_sepolia'],
+  'Mainnets': ['ethereum', 'polygon', 'bsc', 'arbitrum', 'base', 'avalanche', 'optimism', 'linea', 'fantom', 'cronos', 'gnosis', 'chiliz', 'moonbeam', 'gemba'],
+  'Testnets': ['sepolia', 'holesky', 'amoy', 'bsc_testnet', 'arbitrum_sepolia', 'base_sepolia', 'gemba_testnet'],
   'Local':    ['localhost'],
 };
 
 function getMoralisChain(chainKey) {
   const chain = chains[chainKey];
   if (!chain) return null;
+  if (chain.rpcOnly) return null; // Gemba etc. — fetched via RPC/Blockscout, not Moralis
   return chain.hex;
 }
 

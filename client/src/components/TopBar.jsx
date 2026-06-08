@@ -14,6 +14,7 @@ const chainGroups = {
     { key: 'cronos',     name: 'Cronos' },
     { key: 'gnosis',     name: 'Gnosis' },
     { key: 'moonbeam',   name: 'Moonbeam' },
+    { key: 'gemba',      name: 'Gemba' },
   ],
   Testnets: [
     { key: 'sepolia',          name: 'Sepolia' },
@@ -22,6 +23,7 @@ const chainGroups = {
     { key: 'bsc_testnet',      name: 'BSC Testnet' },
     { key: 'arbitrum_sepolia', name: 'Arbitrum Sepolia' },
     { key: 'base_sepolia',     name: 'Base Sepolia' },
+    { key: 'gemba_testnet',    name: 'Gemba Testnet' },
   ],
   Local: [
     { key: 'localhost', name: 'Localhost' },

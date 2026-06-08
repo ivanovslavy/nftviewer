@@ -1,0 +1,38 @@
+# NFTViewer
+
+> Multi-chain NFT gallery browser. Lightweight, private, no wallet connection required. Part of the GEMBA IT ecosystem.
+
+NFTViewer lets anyone browse a wallet's NFT collection across five EVM networks. Paste a wallet address, pick a chain, and the gallery loads with metadata, images, and a full-screen lightbox. There is no signup, no wallet connect, no tracking — just a fast read-only viewer.
+
+## URLs
+
+- Home: https://nftviewer.gembait.com/
+
+## Quick facts
+
+- Supported chains: Ethereum, Polygon, Base, BSC, Arbitrum
+- Data source: Moralis API, proxied by a server-side backend (no user API key required)
+- Privacy: no wallet connection, no account, no tracking
+- Features: multi-chain search, filter to NFTs with images, full metadata lightbox, pagination
+- Fallback: when indexers are missing data for freshly minted collections, the backend reads tokenURI directly and enriches metadata on the fly
+- Animated legacy NFTs: a dedicated HTML proxy renders older collections inside the gallery
+
+## How it works
+
+1. Enter any wallet or contract address
+2. Select the chain (Ethereum, Polygon, Base, BSC, Arbitrum)
+3. The backend queries Moralis, enriches missing metadata by reading tokenURI on-chain where needed
+4. Results render as a paginated grid; click any NFT for the lightbox view with metadata
+
+## Technology
+
+- Frontend: React, Vite
+- Backend: Node.js / Express server-side proxy for Moralis requests
+- Moralis API for indexed NFT data
+- Direct RPC fallback (ethers.js) when indexers lag
+
+## Built by
+
+GEMBA IT — https://gembait.com
+Parent company: GEMBA EOOD (Varna, Bulgaria)
+Contact: contacts@gembait.com
