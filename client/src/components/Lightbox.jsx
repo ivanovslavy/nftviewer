@@ -7,7 +7,7 @@ function truncateAddress(addr) {
 
 function resolveIPFS(url) {
   if (!url) return null;
-  if (url.startsWith('ipfs://')) return url.replace('ipfs://', 'https://ipfs.gembaticket.com/ipfs/');
+  if (url.startsWith('ipfs://')) return url.replace('ipfs://', '/api/ipfs/');
   return url;
 }
 
@@ -156,7 +156,7 @@ export default function Lightbox({ nft, chain, onClose }) {
                 </a>
               ))}
               {animationUrl && (
-                <a className="lightbox-link" href={animationUrl} target="_blank" rel="noopener noreferrer">
+                <a className="lightbox-link" href={`/api/nfts/render?url=${encodeURIComponent(nft.rawMetadata?.animation_url || nft.animationUrl)}`} target="_blank" rel="noopener noreferrer">
                   🎫 Open Ticket
                 </a>
               )}

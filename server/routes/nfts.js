@@ -67,6 +67,105 @@ function setCache(key, data) {
   metadataCache.set(key, { data, ts: Date.now() });
 }
 
+// ── IPFS via the local Kubo API (2026-10-23) ─────────────
+// The public gateways (ipfs.gembaticket.com, ipfs.gembait.com) serve only what is on our main node
+// (Gateway.NoFetch). Our own content is read from the main node OFFLINE; anything else comes from a
+// separate fetch-only node (ipfs-fetch, no gateway) so third-party content never lands on the main node.
+// Served back at /api/ipfs/<path> — images, video and JSON only, never HTML.
+const IPFS_API = process.env.IPFS_API_URL || 'http://127.0.0.1:5001';
+const IPFS_FETCH_API = process.env.IPFS_FETCH_API_URL || 'http://127.0.0.1:5002';
+const IPFS_MAX_BYTES = 25 * 1024 * 1024;
+const IPFS_PATH_RE = /^[A-Za-z0-9]{46,100}(\/[A-Za-z0-9._~\-() %]*)*$/;
+
+function ipfsPathOf(url) {
+  if (typeof url !== 'string') return null;
+  let p = null;
+  if (url.startsWith('ipfs://')) p = url.slice(7);
+  else if (url.startsWith('/api/ipfs/')) p = url.slice(10);
+  if (p && p.startsWith('ipfs/')) p = p.slice(5);
+  if (!p || !IPFS_PATH_RE.test(p) || p.split('/').includes('..')) return null;
+  return p;
+}
+
+async function catFrom(api, path, offline, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const q = `arg=${encodeURIComponent(path)}&length=${IPFS_MAX_BYTES + 1}${offline ? '&offline=true' : ''}`;
+    const res = await fetch(`${api}/api/v0/cat?${q}`, { method: 'POST', signal: controller.signal });
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    return buf.length > IPFS_MAX_BYTES ? null : buf;
+  } catch { return null; } finally { clearTimeout(timer); }
+}
+
+async function ipfsCat(path, timeoutMs) {
+  return (await catFrom(IPFS_API, path, true, 5000)) || catFrom(IPFS_FETCH_API, path, false, timeoutMs || 15000);
+}
+
+function sniffType(buf) {
+  const hex = buf.subarray(0, 12).toString('hex');
+  const head = buf.subarray(0, 512).toString('utf8').trimStart();
+  if (hex.startsWith('89504e47')) return 'image/png';
+  if (hex.startsWith('ffd8ff')) return 'image/jpeg';
+  if (hex.startsWith('47494638')) return 'image/gif';
+  if (hex.startsWith('52494646') && hex.slice(16, 24) === '57454250') return 'image/webp';
+  if (hex.slice(8, 16) === '66747970') return /^.{16}(61766966|61766973)/.test(hex) ? 'image/avif' : 'video/mp4';
+  if (hex.startsWith('1a45dfa3')) return 'video/webm';
+  if (/^(<\?xml[^>]*>\s*)?(<!--[\s\S]*?-->\s*)*<svg[\s>]/i.test(head)) return 'image/svg+xml';
+  if (head.startsWith('{') || head.startsWith('[')) return 'application/json';
+  return null; // HTML, scripts and anything else are refused
+}
+
+const dns = require('dns').promises;
+const net = require('net');
+function isPrivateIp(ip) {
+  if (net.isIPv4(ip)) {
+    const [a, b] = ip.split('.').map(Number);
+    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
+  }
+  const v = ip.toLowerCase();
+  if (v.startsWith('::ffff:')) return isPrivateIp(v.slice(7));
+  return v === '::1' || v === '::' || v.startsWith('fc') || v.startsWith('fd') || v.startsWith('fe80');
+}
+async function isPublicHttpsUrl(url) {
+  let u;
+  try { u = new URL(url); } catch { return false; }
+  if (u.protocol !== 'https:' || u.username || u.password) return false;
+  try {
+    const addrs = await dns.lookup(u.hostname, { all: true });
+    return addrs.length > 0 && addrs.every((a) => !isPrivateIp(a.address));
+  } catch { return false; }
+}
+
+const ipfsHits = new Map();
+function ipfsRateOk(ip) {
+  const now = Date.now();
+  const arr = (ipfsHits.get(ip) || []).filter((t) => now - t < 60000);
+  arr.push(now);
+  ipfsHits.set(ip, arr);
+  if (ipfsHits.size > 10000) ipfsHits.clear();
+  return arr.length <= 300;
+}
+
+// ── GET /api/ipfs/<cid>[/path] ───────────────────────────
+router.get(/^\/ipfs\/(.+)$/, async (req, res) => {
+  const path = ipfsPathOf('/api/ipfs/' + req.params[0]);
+  if (!path) return res.status(400).json({ error: 'Bad IPFS path' });
+  if (!ipfsRateOk(req.headers['cf-connecting-ip'] || req.ip)) return res.status(429).json({ error: 'Too many requests' });
+  const buf = await ipfsCat(path, 20000);
+  if (!buf) return res.status(404).json({ error: 'Not found on IPFS' });
+  const type = sniffType(buf);
+  if (!type) return res.status(415).json({ error: 'Only images, video and JSON are served' });
+  res.set({
+    'Content-Type': type,
+    'X-Content-Type-Options': 'nosniff',
+    'Content-Security-Policy': "default-src 'none'; img-src data:; style-src 'unsafe-inline'; sandbox",
+    'Cache-Control': 'public, max-age=86400, immutable',
+  });
+  res.send(buf);
+});
+
 // ── GET /api/chains ──────────────────────────────────────
 router.get('/chains', (req, res) => {
   const list = Object.entries(chains).map(([key, val]) => ({
@@ -243,18 +342,22 @@ router.get('/nfts/render', async (req, res, next) => {
     const { url } = req.query;
     if (!url) return res.status(400).json({ error: 'Missing url param' });
 
-    const resolved = url.startsWith('ipfs://')
-      ? url.replace('ipfs://', 'https://ipfs.gembaticket.com/ipfs/')
-      : url;
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
-    const response = await fetch(resolved, { signal: controller.signal });
-    clearTimeout(timeout);
-
-    if (!response.ok) return res.status(502).json({ error: 'Failed to fetch' });
-
-    let html = await response.text();
+    let html;
+    const ipfsPath = ipfsPathOf(url);
+    if (ipfsPath) {
+      const buf = await ipfsCat(ipfsPath, 15000);
+      if (!buf) return res.status(502).json({ error: 'Failed to fetch' });
+      html = buf.toString('utf8');
+    } else {
+      // Only public https pages — never our own host or the private network.
+      if (!(await isPublicHttpsUrl(url))) return res.status(400).json({ error: 'Only ipfs:// or public https:// URLs' });
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      const response = await fetch(url, { signal: controller.signal, redirect: 'error' });
+      clearTimeout(timeout);
+      if (!response.ok) return res.status(502).json({ error: 'Failed to fetch' });
+      html = await response.text();
+    }
 
     // Fix 1: Navigation bug - classList.add('')
     html = html.replace(
@@ -280,6 +383,9 @@ router.get('/nfts/render', async (req, res, next) => {
     html = html.replace(/try\{new QRCode\(.*?\}catch\(e\)\{\}/s, '');
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    // Third-party HTML: scripts may run, but in an opaque origin — no access to this site or its storage.
+    res.setHeader('Content-Security-Policy', 'sandbox allow-scripts');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.send(html);
   } catch (err) {
     next(err);
@@ -452,44 +558,19 @@ async function fetchSingleNFTviaRPC(chainKey, contractAddress, tokenId) {
 // HELPERS
 // ══════════════════════════════════════════════════════════
 
-const IPFS_GATEWAYS = [
-  'https://ipfs.gembaticket.com/ipfs/',
-  'https://cloudflare-ipfs.com/ipfs/',
-  'https://w3s.link/ipfs/',
-  'https://dweb.link/ipfs/',
-  'https://ipfs.io/ipfs/',
-];
-
-async function fetchFromGateway(url, timeoutMs) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs || 8000);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timer);
-    if (!res.ok) return null;
-    const text = await res.text();
-    if (text.startsWith('<!DOCTYPE') || text.startsWith('<html') || text.startsWith('<?xml')) return null;
-    return JSON.parse(text);
-  } catch { clearTimeout(timer); return null; }
-}
-
+// Metadata JSON from IPFS through the local Kubo API (the public gateways it used are gone or pinned-only).
 async function fetchWithGatewayFallback(ipfsPath, timeoutMs) {
   const cached = getCached(ipfsPath);
   if (cached) return cached;
-
-  // Race first 2 gateways, then try rest sequentially
-  const fast = await Promise.any([
-    fetchFromGateway(IPFS_GATEWAYS[0] + ipfsPath, timeoutMs || 8000),
-    fetchFromGateway(IPFS_GATEWAYS[1] + ipfsPath, timeoutMs || 8000),
-  ]).catch(() => null);
-
-  if (fast) { setCache(ipfsPath, fast); return fast; }
-
-  for (let i = 2; i < IPFS_GATEWAYS.length; i++) {
-    const result = await fetchFromGateway(IPFS_GATEWAYS[i] + ipfsPath, timeoutMs || 8000);
-    if (result) { setCache(ipfsPath, result); return result; }
-  }
-  return null;
+  const path = ipfsPathOf('ipfs://' + ipfsPath);
+  if (!path) return null;
+  const buf = await ipfsCat(path, timeoutMs || 10000);
+  if (!buf) return null;
+  try {
+    const data = JSON.parse(buf.toString('utf8'));
+    setCache(ipfsPath, data);
+    return data;
+  } catch { return null; }
 }
 
 async function fetchMetadataFromURI(uri, tokenId) {
@@ -571,13 +652,9 @@ function tryParseMetadata(metadata) {
 function resolveIPFS(url) {
   if (!url) return null;
   if (url.startsWith('ipfs://')) {
-    const path = url.slice(7);
-    // CIDv1 (bafybei/bafkrei) -> public gateway (browser handles challenges)
-    // CIDv0 (Qm) -> self-hosted node (fast, local content)
-    if (path.startsWith('bafybei') || path.startsWith('bafkrei')) {
-      return 'https://nftstorage.link/ipfs/' + path;
-    }
-    return 'https://ipfs.gembaticket.com/ipfs/' + path;
+    // Every CID, ours or another chain's, through our own /api/ipfs (local Kubo API).
+    const path = ipfsPathOf(url);
+    return path ? '/api/ipfs/' + path : null;
   }
   if (url.startsWith('ar://')) return url.replace('ar://', 'https://arweave.net/');
   return url;
