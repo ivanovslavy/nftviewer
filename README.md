@@ -31,7 +31,7 @@ Server (Express.js, port 4002)
 - **Three query modes:** Wallet Address (WA), Contract Address (CA), or WA+CA combined with server-side filtering
 - **Moralis + RPC dual-source:** Automatic fallback to direct contract calls when Moralis returns incomplete data
 - **Metadata enrichment:** Fetches tokenURI from on-chain contracts when Moralis omits metadata fields (name, image, animation_url)
-- **IPFS resolution:** Configurable gateway (default: self-hosted node) for `ipfs://` and `ar://` URI schemes
+- **IPFS resolution:** every `ipfs://` link is served by the backend at `/api/ipfs/<cid>/<path>` from the local Kubo API — our own content offline from the main node, third-party NFTs through a separate fetch-only node (`ipfs-fetch`, `127.0.0.1:5002`, no gateway). Images, video and JSON only; `ar://` maps to arweave.net
 - **Lightbox detail view:** Full metadata display with attributes, contract links, explorer URLs, and raw JSON export
 - **Interactive NFT rendering:** Detects `animation_url` HTML content and renders in embedded iframe with Image/Ticket view toggle
 - **HTML proxy endpoint:** Fetches and patches legacy NFT HTML on the fly (navigation bug fixes, QR code injection)
@@ -85,7 +85,7 @@ LOCALHOST_RPC=http://127.0.0.1:8545
 PORT=4002
 ```
 
-IPFS gateway is configured in `server/routes/nfts.js` via the `resolveIPFS()` function. Default maps `ipfs://` to `https://ipfs.gembaticket.com/ipfs/`.
+IPFS is configured in `server/routes/nfts.js` (`resolveIPFS()`, `ipfsCat()`): `ipfs://` → `/api/ipfs/...`. `IPFS_API_URL` (default `http://127.0.0.1:5001`, read offline) and `IPFS_FETCH_API_URL` (default `http://127.0.0.1:5002`, the fetch-only node). The public gateways (`ipfs.gembaticket.com`, `ipfs.gembait.com`) serve only content pinned on our node (`Gateway.NoFetch`), so third-party content must never be fetched through the main node — it would become public under our domain. `/api/nfts/render` accepts only `ipfs://` or public `https://` URLs and is served with `Content-Security-Policy: sandbox allow-scripts`.
 
 ## Installation
 
