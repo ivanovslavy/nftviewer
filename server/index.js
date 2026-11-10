@@ -2,7 +2,6 @@ require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') }
 
 const express = require('express');
 const cors = require('cors');
-const Moralis = require('moralis').default;
 const nftRoutes = require('./routes/nfts');
 const errorHandler = require('./middleware/errorHandler');
 
@@ -37,12 +36,15 @@ app.use(errorHandler);
 // ── Start ───────────────────────────────────────────────
 async function start() {
   try {
-    if (!process.env.MORALIS_API_KEY || process.env.MORALIS_API_KEY === 'your_moralis_api_key_here') {
-      console.warn('\n⚠️  MORALIS_API_KEY not set! Copy .env.example → .env and add your key.');
-      console.warn('   Get one free at: https://admin.moralis.io/\n');
+    // NFTs on public chains come from the Alchemy NFT API (ALCHEMY_API_KEY); Gemba chains from
+    // Blockscout/RPC. Moralis was removed on 2026-11-10 after its free tier was withdrawn.
+    const alchemyKeyCount = (process.env.ALCHEMY_API_KEYS || process.env.ALCHEMY_NFT_KEY || process.env.ALCHEMY_API_KEY || '')
+      .split(/[,\s]+/).map((k) => k.trim()).filter(Boolean).length;
+    if (alchemyKeyCount === 0) {
+      console.warn('\n⚠️  No Alchemy key (ALCHEMY_API_KEYS) set — public-chain NFT lookups will be empty.');
+      console.warn('   Gemba chains still work via Blockscout/RPC.\n');
     } else {
-      await Moralis.start({ apiKey: process.env.MORALIS_API_KEY });
-      console.log('✓ Moralis SDK initialized');
+      console.log(`✓ NFT provider: Alchemy (${alchemyKeyCount} key${alchemyKeyCount > 1 ? 's, rotating' : ''})`);
     }
 
     app.listen(PORT, () => {

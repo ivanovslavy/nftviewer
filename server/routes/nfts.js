@@ -1,6 +1,9 @@
 const express = require('express');
 const router = express.Router();
-const Moralis = require('moralis').default;
+// Moralis replaced by Alchemy NFT API on 2026-11-10 (Moralis free tier was withdrawn). The Alchemy
+// adapter returns the same shape Moralis did, so the formatting below is unchanged. getMoralisChain()
+// keeps its name/role: it answers "is this a public (non-Gemba) chain?" — Gemba stays on Blockscout.
+const alchemy = require('../lib/alchemy');
 const { getMoralisChain, getExplorerUrl, chains, chainGroups } = require('../config/chains');
 const { ethers } = require('ethers');
 
@@ -184,18 +187,9 @@ router.get('/nfts/contract/:chain/:address', async (req, res, next) => {
       return res.json(await fetchRPCContractNFTs(chain, address, parseInt(limit)));
     }
 
-    const moralisChain = getMoralisChain(chain);
-
-    if (moralisChain) {
+    if (alchemy.alchemyAvailable(chain)) {
       try {
-        const response = await Moralis.EvmApi.nft.getContractNFTs({
-          address, chain: moralisChain,
-          limit: Math.min(parseInt(limit), 100),
-          cursor: cursor || undefined,
-          normalizeMetadata: true,
-        });
-        const result = response.toJSON();
-
+        const result = await alchemy.contractNFTs(chain, address, { limit: parseInt(limit), cursor });
         if (result.result && result.result.length > 0) {
           return res.json({
             total: result.total || 0,
@@ -203,12 +197,12 @@ router.get('/nfts/contract/:chain/:address', async (req, res, next) => {
             pageSize: result.page_size || parseInt(limit),
             cursor: result.cursor || null,
             results: (result.result || []).map(nft => formatNFT(nft, chain, address)),
-            source: 'moralis',
+            source: 'alchemy',
           });
         }
-        console.log(`[FALLBACK] Moralis empty for ${chain}/${address}, trying RPC...`);
-      } catch (moralisErr) {
-        console.log(`[MORALIS ERROR] ${moralisErr.message}, falling back to RPC...`);
+        console.log(`[FALLBACK] Alchemy empty for ${chain}/${address}, trying RPC...`);
+      } catch (alchemyErr) {
+        console.log(`[ALCHEMY ERROR] ${alchemyErr.message}, falling back to RPC...`);
       }
     }
 
@@ -240,27 +234,21 @@ router.get('/nfts/wallet/:chain/:address', async (req, res, next) => {
       return res.status(400).json({ error: `Unsupported chain: ${chain}` });
     }
 
-    const options = {
-      address, chain: moralisChain,
-      limit: Math.min(parseInt(limit), 100),
-      cursor: cursor || undefined,
-      normalizeMetadata: true,
-    };
-
-    if (token_addresses) {
-      options.tokenAddresses = token_addresses.split(',');
+    let providerResults = null;
+    if (alchemy.alchemyAvailable(chain)) {
+      try {
+        providerResults = await alchemy.walletNFTs(chain, address, {
+          limit: parseInt(limit),
+          cursor: cursor || undefined,
+          tokenAddresses: token_addresses ? token_addresses.split(',') : undefined,
+        });
+      } catch (alchemyErr) {
+        console.log(`[ALCHEMY WALLET ERROR] ${alchemyErr.message}`);
+      }
     }
 
-    let moralisResults = null;
-    try {
-      const response = await Moralis.EvmApi.nft.getWalletNFTs(options);
-      moralisResults = response.toJSON();
-    } catch (moralisErr) {
-      console.log(`[MORALIS WALLET ERROR] ${moralisErr.message}`);
-    }
-
-    if (moralisResults) {
-      let results = (moralisResults.result || []).map(nft => formatNFT(nft, chain, nft.token_address));
+    if (providerResults) {
+      let results = (providerResults.result || []).map(nft => formatNFT(nft, chain, nft.token_address));
 
       if (results.length === 0 && token_addresses && !cursor) {
         const contracts = token_addresses.split(',');
@@ -278,12 +266,12 @@ router.get('/nfts/wallet/:chain/:address', async (req, res, next) => {
       }
 
       return res.json({
-        total: moralisResults.total || 0,
-        page: moralisResults.page || 0,
-        pageSize: moralisResults.page_size || parseInt(limit),
-        cursor: moralisResults.cursor || null,
+        total: providerResults.total || 0,
+        page: providerResults.page || 0,
+        pageSize: providerResults.page_size || parseInt(limit),
+        cursor: providerResults.cursor || null,
         results: await enrichMissingMetadata(results, chain),
-        source: 'moralis',
+        source: 'alchemy',
       });
     }
 
@@ -301,7 +289,7 @@ router.get('/nfts/wallet/:chain/:address', async (req, res, next) => {
       });
     }
 
-    res.json({ total: 0, page: 0, pageSize: 0, cursor: null, results: [], error: 'Moralis unavailable and no contract filter for RPC fallback' });
+    res.json({ total: 0, page: 0, pageSize: 0, cursor: null, results: [], error: 'No NFT provider for this chain and no contract filter for RPC fallback' });
   } catch (err) {
     next(err);
   }
@@ -311,19 +299,15 @@ router.get('/nfts/wallet/:chain/:address', async (req, res, next) => {
 router.get('/nfts/metadata/:chain/:address/:tokenId', async (req, res, next) => {
   try {
     const { chain, address, tokenId } = req.params;
-    const moralisChain = getMoralisChain(chain);
 
-    if (moralisChain) {
+    if (alchemy.alchemyAvailable(chain)) {
       try {
-        const response = await Moralis.EvmApi.nft.getNFTMetadata({
-          address, chain: moralisChain, tokenId, normalizeMetadata: true,
-        });
-        const nft = response.toJSON();
+        const nft = await alchemy.nftMetadata(chain, address, tokenId);
         if (nft && nft.token_id) {
           return res.json(formatNFT(nft, chain, address));
         }
       } catch (e) {
-        console.log(`[FALLBACK] Moralis metadata failed: ${e.message}`);
+        console.log(`[FALLBACK] Alchemy metadata failed: ${e.message}`);
       }
     }
 
